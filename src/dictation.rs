@@ -1108,7 +1108,6 @@ impl DictationCapture {
             .is_some_and(|recording| recording.intentional)
     }
 
-    #[cfg(test)]
     pub fn is_streaming(&self) -> bool {
         self.recording
             .as_ref()
@@ -1161,6 +1160,27 @@ impl DictationCapture {
             recording.stream = engine.begin();
             recording.feed_stream();
         }
+    }
+
+    /// Opens Live typing's quick preview stream instead of a [`Self::begin_stream`].
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub fn begin_preview_stream(&mut self, engine: &TranscriptionEngine, chunk_ms: u32) {
+        let Some(recording) = &mut self.recording else {
+            return;
+        };
+        if recording.stream.is_none() {
+            recording.stream = engine.begin_preview(chunk_ms);
+            recording.feed_stream();
+        }
+    }
+
+    /// Whether the active recording streams Live typing's preview.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub fn is_previewing(&self) -> bool {
+        self.recording
+            .as_ref()
+            .and_then(|recording| recording.stream.as_ref())
+            .is_some_and(crate::transcription::engine::LiveStream::is_preview)
     }
 
     #[cfg(test)]

@@ -11,6 +11,7 @@ pub(crate) mod icons;
 // Keep `linux_input::tests` in the test path for check-linux.yml's Xvfb filter.
 #[path = "linux/input.rs"]
 pub(crate) mod linux_input;
+pub(crate) mod live_typing;
 pub(crate) use linux_input as input;
 pub(crate) mod input_route;
 pub(crate) mod login_item;

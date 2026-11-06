@@ -20,7 +20,7 @@
 //! Gate a feature where its work starts (the worker, thread, or capture
 //! that does it), not only where its UI shows.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use clap::Subcommand;
 use color_eyre::Result;
@@ -59,6 +59,15 @@ impl Audience {
             Self::Dev => "dev",
         }
     }
+}
+
+/// Whether this session is Wayland, whose input method Live typing needs.
+/// Tests stay independent of the session they run in.
+fn wayland_session() -> bool {
+    #[cfg(target_os = "linux")]
+    return cfg!(test) || crate::linux::session::LinuxSession::detect().is_wayland();
+    #[cfg(not(target_os = "linux"))]
+    false
 }
 
 /// One Labs feature.
@@ -109,6 +118,7 @@ pub enum Feature {
     NotchIndicator,
     MeetingFinishedEvent,
     GnomeMeetingCapsules,
+    LiveTyping,
     Screenshots,
     FollowLiveTranscript,
     MoreCallApps,
@@ -117,7 +127,7 @@ pub enum Feature {
 }
 
 impl Feature {
-    pub const ALL: [Self; 50] = [
+    pub const ALL: [Self; 51] = [
         Self::Meetings,
         Self::VoiceFilter,
         Self::Playground,
@@ -163,6 +173,7 @@ impl Feature {
         Self::NotchIndicator,
         Self::MeetingFinishedEvent,
         Self::GnomeMeetingCapsules,
+        Self::LiveTyping,
         Self::Screenshots,
         Self::FollowLiveTranscript,
         Self::MoreCallApps,
@@ -237,6 +248,7 @@ impl Feature {
             | Self::MeetingNotesVocabulary
             | Self::MeetingFinishedEvent
             | Self::GnomeMeetingCapsules
+            | Self::LiveTyping
             | Self::Screenshots
             | Self::FollowLiveTranscript
             | Self::MoreCallApps
@@ -296,7 +308,9 @@ impl Feature {
             | Self::Screenshots
             | Self::FollowLiveTranscript
             | Self::AnnotateReplay => 20261104,
-            Self::MoreCallApps | Self::SettingsSearch | Self::MeetingImport => 20261106,
+            Self::MoreCallApps | Self::SettingsSearch | Self::MeetingImport | Self::LiveTyping => {
+                20261106
+            }
         }
     }
 
@@ -316,6 +330,9 @@ impl Feature {
     pub fn for_settings_key(key: &str) -> Option<Self> {
         if key == "labs.unload_idle_minutes" {
             return Some(Self::UnloadIdle);
+        }
+        if key == "labs.live_typing_chunk_ms" {
+            return Some(Self::LiveTyping);
         }
         if key == "capture.replay_hotkey" {
             return Some(Self::AnnotateReplay);
@@ -339,6 +356,7 @@ impl Feature {
             Self::SectionKeyAlone | Self::GnomeClipboardRestore | Self::GnomeMeetingCapsules => {
                 cfg!(target_os = "linux")
             }
+            Self::LiveTyping => wayland_session(),
             Self::StandaloneSpecialKeys | Self::SkipPauses => {
                 cfg!(any(target_os = "linux", target_os = "windows"))
             }
@@ -438,6 +456,7 @@ impl Feature {
             Self::NotchIndicator => "notch-indicator",
             Self::MeetingFinishedEvent => "meeting-finished-event",
             Self::GnomeMeetingCapsules => "gnome-meeting-capsules",
+            Self::LiveTyping => "live-typing",
             Self::Screenshots => "screenshots",
             Self::FollowLiveTranscript => "follow-live-transcript",
             Self::MoreCallApps => "more-call-apps",
@@ -494,6 +513,7 @@ impl Feature {
             Self::NotchIndicator => "labs.notch_indicator",
             Self::MeetingFinishedEvent => "labs.meeting_finished_event",
             Self::GnomeMeetingCapsules => "labs.gnome_meeting_capsules",
+            Self::LiveTyping => "labs.live_typing",
             Self::Screenshots => "labs.screenshots",
             Self::FollowLiveTranscript => "labs.follow_live_transcript",
             Self::MoreCallApps => "labs.more_call_apps",
@@ -617,6 +637,9 @@ impl Feature {
             Self::MeetingFinishedEvent => {
                 "Tell apps on this computer when a meeting's transcript is ready, through the local API's GET /meetings/events (the meeting's id only)"
             }
+            Self::LiveTyping => {
+                "Type provisional words into the focused field as you speak, then type the final text there instead of pasting (Wayland; labs.live_typing_chunk_ms sets how often they update)"
+            }
             Self::GnomeMeetingCapsules => {
                 "Show the meeting capsules (recording offer, recording indicator) floating over your call on GNOME Wayland, through XWayland while XWayland is running"
             }
@@ -690,6 +713,7 @@ impl Feature {
             Self::NotchIndicator => settings.labs.notch_indicator,
             Self::MeetingFinishedEvent => settings.labs.meeting_finished_event,
             Self::GnomeMeetingCapsules => settings.labs.gnome_meeting_capsules,
+            Self::LiveTyping => settings.labs.live_typing,
             Self::Screenshots => settings.labs.screenshots,
             Self::FollowLiveTranscript => settings.labs.follow_live_transcript,
             Self::MoreCallApps => settings.labs.more_call_apps,
@@ -748,6 +772,7 @@ impl Feature {
             &mut labs.notch_indicator,
             &mut labs.meeting_finished_event,
             &mut labs.gnome_meeting_capsules,
+            &mut labs.live_typing,
             &mut labs.screenshots,
             &mut labs.follow_live_transcript,
             &mut labs.more_call_apps,
@@ -806,6 +831,7 @@ impl Feature {
             Self::NotchIndicator => settings.labs.notch_indicator = on,
             Self::MeetingFinishedEvent => settings.labs.meeting_finished_event = on,
             Self::GnomeMeetingCapsules => settings.labs.gnome_meeting_capsules = on,
+            Self::LiveTyping => settings.labs.live_typing = on,
             Self::Screenshots => settings.labs.screenshots = on,
             Self::FollowLiveTranscript => settings.labs.follow_live_transcript = on,
             Self::MoreCallApps => settings.labs.more_call_apps = on,
@@ -865,10 +891,14 @@ const MINUTES_BITS: u32 = 11;
 const MINUTES_MASK: u64 = (1 << MINUTES_BITS) - 1;
 /// Bits 1..31 are full, so this switch sits above the minutes.
 const MEETING_IMPORT: u64 = 1 << (MINUTES_SHIFT + MINUTES_BITS as u64);
+const LIVE_TYPING: u64 = MEETING_IMPORT << 1;
 
 /// This process's `labs` switches: unknown until settings load or one is
 /// first read.
 static STATE: AtomicU64 = AtomicU64::new(0);
+/// Live typing's preview chunk: unknown (0) until settings load or it is
+/// first read.
+static LIVE_TYPING_CHUNK: AtomicU32 = AtomicU32::new(0);
 
 fn on(bit: u64) -> bool {
     state() & bit != 0
@@ -877,7 +907,12 @@ fn on(bit: u64) -> bool {
 fn state() -> u64 {
     match STATE.load(Ordering::Acquire) {
         0 => {
-            let saved = encode(&AppSettings::saved_labs());
+            // Tests never read this computer's saved settings.
+            let saved = if cfg!(test) {
+                encode(&crate::app_settings::LabsSettings::default())
+            } else {
+                encode(&AppSettings::saved_labs())
+            };
             let _ = STATE.compare_exchange(0, saved, Ordering::AcqRel, Ordering::Acquire);
             STATE.load(Ordering::Acquire)
         }
@@ -1046,6 +1081,32 @@ pub fn notch_indicator() -> bool {
     on(NOTCH_INDICATOR) && Feature::NotchIndicator.on_this_os()
 }
 
+/// Live typing: words show in the focused field through the Wayland input
+/// method, and the final text is typed there (Linux; read at each update).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn live_typing() -> bool {
+    on(LIVE_TYPING) && Feature::LiveTyping.on_this_os()
+}
+
+/// Live typing's preview chunk in milliseconds (read as each dictation's
+/// stream opens, so a change applies to the next dictation).
+pub fn live_typing_chunk_ms() -> u32 {
+    use crate::app_settings::{DEFAULT_LIVE_TYPING_CHUNK_MS, LIVE_TYPING_CHUNK_MS};
+    let chunk = match LIVE_TYPING_CHUNK.load(Ordering::Acquire) {
+        0 if !cfg!(test) => {
+            let saved = AppSettings::saved_labs().live_typing_chunk_ms;
+            LIVE_TYPING_CHUNK.store(saved, Ordering::Release);
+            saved
+        }
+        chunk => chunk,
+    };
+    if LIVE_TYPING_CHUNK_MS.contains(&chunk) {
+        chunk
+    } else {
+        DEFAULT_LIVE_TYPING_CHUNK_MS
+    }
+}
+
 /// A paste on a Wayland desktop without data-control (GNOME) snapshots and
 /// restores the clipboard through an already running XWayland (Linux; read
 /// as each paste starts).
@@ -1100,6 +1161,7 @@ pub fn unload_idle() -> Option<std::time::Duration> {
 
 /// Records the switches the loaded or saved settings hold.
 pub(crate) fn apply(settings: &LabsSettings) {
+    LIVE_TYPING_CHUNK.store(settings.live_typing_chunk_ms, Ordering::Release);
     STATE.store(encode(settings), Ordering::Release);
 }
 
@@ -1230,6 +1292,7 @@ fn encode_where(settings: &LabsSettings, reaches: impl Fn(Feature) -> bool) -> u
             settings.gnome_meeting_capsules,
             GNOME_MEETING_CAPSULES,
         ),
+        (Feature::LiveTyping, settings.live_typing, LIVE_TYPING),
         (Feature::Screenshots, settings.screenshots, SCREENSHOTS),
     ]
     .into_iter()
@@ -1754,6 +1817,18 @@ mod tests {
         assert_eq!(state & SCREENSHOTS, 0);
         assert_eq!(state >> MINUTES_SHIFT, 24 * 60);
     }
+    #[test]
+    fn live_typing_is_its_own_bit_and_off_by_default() {
+        let mut labs = LabsSettings::default();
+        assert_eq!(encode_where(&labs, |_| true) & LIVE_TYPING, 0);
+        labs.live_typing = true;
+        labs.unload_idle = true;
+        labs.unload_idle_minutes = 24 * 60;
+        let state = encode_where(&labs, |_| true);
+        assert_ne!(state & LIVE_TYPING, 0);
+        assert_eq!((state >> MINUTES_SHIFT) & MINUTES_MASK, 24 * 60);
+    }
+
     #[test]
     fn gnome_meeting_capsules_is_its_own_bit_and_off_by_default() {
         let mut labs = LabsSettings::default();

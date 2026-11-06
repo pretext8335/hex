@@ -27,6 +27,7 @@ Feature             Pane  Toggle (settings.json, hex settings)   On: what it doe
 │                                        a stable build never feeds it; with the macOS driver installed it keeps the pane with Uninstall alone
 ├── Playground (Dev) yes  labs.playground                        a Playground sidebar item and ⇧⌘D open the story browser
 ├── Live text       no    labs.live_text                         provisional words beside the HUD while dictating
+├── Live typing     no    labs.live_typing + labs.live_typing_chunk_ms (Wayland) shows your words in the text field as you speak, then types the final text there
 ├── Settings search no    labs.settings_search                  a search field atop General filters its rows, Advanced's included
 ├── Live chapters   no    labs.live_chapters           (macOS)   chapters a meeting while it records, boundary pass after Stop
 ├── Vocabulary biasing no labs.vocabulary_biasing                Parakeet transcription biased toward the vocabulary (#452/#457)

@@ -78,6 +78,10 @@ pub struct LabsSettings {
     pub meeting_finished_event: bool,
     /// The meeting capsules float on a running XWayland on Wayland desktops without layer-shell, such as GNOME (Linux, issue 1274).
     pub gnome_meeting_capsules: bool,
+    /// Dictated words show provisionally in the focused field, and the final text is typed there instead of pasted (Wayland).
+    pub live_typing: bool,
+    /// How often Live typing's preview updates: its stream's chunk and right context, one of [`LIVE_TYPING_CHUNK_MS`].
+    pub live_typing_chunk_ms: u32,
     /// The screenshot shortcut takes an area or a window (macOS); its
     /// shortcut and folder are `screenshots.*`.
     pub screenshots: bool,
@@ -97,6 +101,11 @@ pub struct LabsSettings {
 
 /// The idle times Labs › Unload model when idle offers, in minutes.
 pub const UNLOAD_IDLE_MINUTES: [u32; 4] = [5, 15, 30, 60];
+
+/// The chunk sizes Parakeet's streaming models accept (80 ms encoder frames
+/// in their training menu).
+pub const LIVE_TYPING_CHUNK_MS: [u32; 4] = [80, 160, 560, 1040];
+pub const DEFAULT_LIVE_TYPING_CHUNK_MS: u32 = 160;
 
 impl Default for LabsSettings {
     fn default() -> Self {
@@ -143,6 +152,8 @@ impl Default for LabsSettings {
             annotate_replay: false,
             more_call_apps: false,
             gnome_meeting_capsules: false,
+            live_typing: false,
+            live_typing_chunk_ms: DEFAULT_LIVE_TYPING_CHUNK_MS,
             screenshots: false,
             follow_live_transcript: false,
             meeting_import: false,

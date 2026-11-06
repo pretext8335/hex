@@ -110,7 +110,11 @@ const UNIT: Kind = Kind::Number { min: 0.0, max: 1.0 };
 const MODEL_CHANGE: &str = "change the transcription model with `hex model use`";
 
 /// Choice keys whose values are numbers in settings.json.
-const NUMERIC_CHOICES: [&str; 2] = ["meetings.calendar.lead_minutes", "labs.unload_idle_minutes"];
+const NUMERIC_CHOICES: [&str; 3] = [
+    "meetings.calendar.lead_minutes",
+    "labs.unload_idle_minutes",
+    "labs.live_typing_chunk_ms",
+];
 
 const KEYS: &[Key] = &[
     key(
@@ -463,6 +467,16 @@ const KEYS: &[Key] = &[
         "labs.gnome_clipboard_restore",
         Kind::Bool,
         "Labs: on Wayland desktops without data-control, such as GNOME, a paste restores the previous clipboard through XWayland while it is already running (Linux)",
+    ),
+    key(
+        "labs.live_typing",
+        Kind::Bool,
+        "Labs: dictated words show provisionally in the focused field as you speak, and the final text is typed there instead of pasted; apps without text-input still paste (Wayland)",
+    ),
+    key(
+        "labs.live_typing_chunk_ms",
+        Kind::Choice(&["80", "160", "560", "1040"]),
+        "How often Labs › Live typing updates its provisional words, in milliseconds; shorter is sooner and rougher, and the final text is unaffected",
     ),
     key(
         "labs.gnome_meeting_capsules",
@@ -1256,6 +1270,10 @@ fn parse(key: &Key, raw: &str, shortcuts: &ShortcutRules) -> Result<Value, Contr
                 let minutes: u8 = choice.parse().expect("lead choices are numbers");
                 debug_assert!(CALENDAR_LEAD_MINUTES.contains(&minutes));
                 Value::from(minutes)
+            } else if name == "labs.live_typing_chunk_ms" {
+                let chunk: u32 = choice.parse().expect("chunk choices are numbers");
+                debug_assert!(crate::app_settings::LIVE_TYPING_CHUNK_MS.contains(&chunk));
+                Value::from(chunk)
             } else if name == "labs.unload_idle_minutes" {
                 let minutes: u32 = choice.parse().expect("idle choices are numbers");
                 debug_assert!(crate::app_settings::UNLOAD_IDLE_MINUTES.contains(&minutes));

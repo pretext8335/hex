@@ -87,8 +87,10 @@ pub(crate) enum Command {
         /// Aborts this stream only.
         cancel: CancelToken,
         /// Where the stream publishes its text after each feed, when live
-        /// text is on (Labs).
+        /// text is on (Labs) or it previews.
         partials: Option<Partials>,
+        /// Live typing's preview chunk, instead of the model's default.
+        preview_chunk_ms: Option<u32>,
     },
     Feed {
         stream: u64,
@@ -417,9 +419,16 @@ pub struct LiveStream {
     /// The stream's text so far, with live text on, and the last version
     /// [`Self::take_partial`] returned.
     partials: Option<(Partials, u64)>,
+    preview: bool,
 }
 
 impl LiveStream {
+    /// Whether this is Live typing's quick preview, whose text is replaced
+    /// by the whole clip's.
+    pub fn is_preview(&self) -> bool {
+        self.preview
+    }
+
     /// Total samples handed to the stream so far.
     pub fn fed(&self) -> usize {
         self.fed
@@ -449,6 +458,8 @@ impl LiveStream {
 impl Drop for LiveStream {
     fn drop(&mut self) {
         if !self.finished {
+            // Fails queued feeds fast, so what comes next need not wait.
+            self.cancel.cancel();
             let _ = self.commands.send(Command::Cancel { stream: self.id });
         }
     }
@@ -524,6 +535,28 @@ impl PendingTranscript {
             stream.cancel();
         }
     }
+}
+
+/// Stream options for Live typing's quick preview: `chunk_ms` of chunk and of
+/// right context. `None` keeps `options` when `HEX_STREAM_CHUNK_MS` set them.
+fn preview_options(
+    options: &transcribe_cpp::StreamOptions,
+    chunk_ms: u32,
+) -> Option<transcribe_cpp::StreamOptions> {
+    let chunk_ms = Some(chunk_ms as i32);
+    options
+        .family
+        .is_none()
+        .then(|| transcribe_cpp::StreamOptions {
+            family: Some(transcribe_cpp::StreamExtension::ParakeetBuffered(
+                transcribe_cpp::ParakeetBufferedStreamOptions {
+                    left_ms: None,
+                    chunk_ms,
+                    right_ms: chunk_ms,
+                },
+            )),
+            ..options.clone()
+        })
 }
 
 impl TranscriptionEngine {
@@ -608,18 +641,31 @@ impl TranscriptionEngine {
 
     /// Opens a live stream when the loaded model can stream on this device.
     pub fn begin(&self) -> Option<LiveStream> {
+        self.open(None)
+    }
+
+    /// Opens Live typing's quick preview: a stream at `chunk_ms` that always
+    /// publishes its text.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub fn begin_preview(&self, chunk_ms: u32) -> Option<LiveStream> {
+        self.open(Some(chunk_ms))
+    }
+
+    fn open(&self, preview_chunk_ms: Option<u32>) -> Option<LiveStream> {
         if !self.streams.load(Ordering::Acquire) {
             return None;
         }
         let id = self.next_stream.fetch_add(1, Ordering::Relaxed) + 1;
         let cancel = CancelToken::new();
-        let partials = (self.live_text)().then(Partials::default);
+        let preview = preview_chunk_ms.is_some();
+        let partials = (preview || (self.live_text)()).then(Partials::default);
         self.requests.fetch_add(1, Ordering::AcqRel);
         self.commands
             .send(Command::Begin {
                 stream: id,
                 cancel: cancel.clone(),
                 partials: partials.clone(),
+                preview_chunk_ms,
             })
             .ok()?;
         Some(LiveStream {
@@ -629,6 +675,7 @@ impl TranscriptionEngine {
             finished: false,
             commands: self.commands.clone(),
             partials: partials.map(|partials| (partials, 0)),
+            preview,
         })
     }
 
@@ -965,10 +1012,18 @@ impl Worker {
                     stream,
                     cancel,
                     partials,
+                    preview_chunk_ms,
                 } => {
                     self.dictating.store(true, Ordering::Release);
                     crate::dictation::vocabulary::for_dictation(|| {
-                        self.stream(stream, &cancel, partials.as_ref(), &commands, &mut next);
+                        self.stream(
+                            stream,
+                            &cancel,
+                            partials.as_ref(),
+                            preview_chunk_ms,
+                            &commands,
+                            &mut next,
+                        );
                     });
                     self.dictating.store(false, Ordering::Release);
                 }
@@ -1150,6 +1205,7 @@ impl Worker {
         id: u64,
         cancel: &CancelToken,
         partials: Option<&Partials>,
+        preview_chunk_ms: Option<u32>,
         commands: &Receiver<Command>,
         next: &mut VecDeque<Command>,
     ) {
@@ -1159,6 +1215,7 @@ impl Worker {
         else {
             return;
         };
+        let preview = preview_chunk_ms.and_then(|chunk_ms| preview_options(&options, chunk_ms));
         self.running.enter(cancel);
         let begun = Instant::now();
         let mut stats = FeedStats::default();
@@ -1167,20 +1224,38 @@ impl Worker {
             return;
         };
         let trailing_silence = stream_trailing_silence(model);
-        let ended = model.with_stream(&options, cancel, |stream| {
-            let mut capped = PauseCap::new(stream, trailing_silence);
-            let ended = drive_stream(
-                id,
-                &mut capped,
-                commands,
-                stalled,
-                partials,
-                next,
-                &mut stats,
-            );
-            stats.pauses_dropped_ms = capped.dropped / 16;
-            ended
-        });
+        let mut ended = None;
+        // A model whose menu lacks the preview's chunk refuses it before the
+        // stream begins, and streams at its own default instead.
+        for options in preview.iter().chain([&options]) {
+            let mut began = false;
+            let attempt = model.with_stream(options, cancel, |stream| {
+                began = true;
+                let mut capped = PauseCap::new(stream, trailing_silence);
+                let ended = drive_stream(
+                    id,
+                    &mut capped,
+                    commands,
+                    stalled,
+                    partials,
+                    next,
+                    &mut stats,
+                );
+                stats.pauses_dropped_ms = capped.dropped / 16;
+                ended
+            });
+            let settled = began || attempt.is_ok();
+            if !settled && let Err(error) = &attempt {
+                tracing::info!(%error, "this stream's options were refused");
+            }
+            ended = Some(attempt);
+            if settled {
+                break;
+            }
+        }
+        let Some(ended) = ended else {
+            return;
+        };
         let FeedStats {
             feed_ms,
             feeds,
@@ -1296,6 +1371,51 @@ impl Worker {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_a_preview_asks_for_its_chunk_and_always_publishes() {
+        let (engine, commands) = TranscriptionEngine::for_test();
+        let plain = engine.begin().unwrap();
+        assert!(!plain.is_preview());
+        let preview = engine.begin_preview(160).unwrap();
+        assert!(preview.is_preview());
+        let begun: Vec<_> = commands
+            .try_iter()
+            .filter_map(|command| match command {
+                Command::Begin {
+                    partials,
+                    preview_chunk_ms,
+                    ..
+                } => Some((partials.is_some(), preview_chunk_ms)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(begun, [(false, None), (true, Some(160))]);
+    }
+
+    #[test]
+    fn dropping_a_stream_cancels_its_queued_feeds() {
+        let (engine, _commands) = TranscriptionEngine::for_test();
+        let stream = engine.begin().unwrap();
+        let cancel = stream.cancel.clone();
+        drop(stream);
+        assert!(cancel.is_cancelled());
+    }
+
+    #[test]
+    fn the_preview_sets_its_chunk_and_leaves_a_chosen_stream_alone() {
+        let plain = transcribe_cpp::StreamOptions::default();
+        let preview = preview_options(&plain, 160).unwrap();
+        let Some(transcribe_cpp::StreamExtension::ParakeetBuffered(chosen)) = &preview.family
+        else {
+            panic!("the preview names its chunk");
+        };
+        assert_eq!(
+            (chosen.left_ms, chosen.chunk_ms, chosen.right_ms),
+            (None, Some(160), Some(160))
+        );
+        assert!(preview_options(&preview, 80).is_none());
+    }
+
     use super::*;
 
     #[test]

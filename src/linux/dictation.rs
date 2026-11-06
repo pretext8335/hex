@@ -243,7 +243,11 @@ impl DictationOutput {
         }
         let printed = paster.is_none();
         if let Some(paster) = paster {
-            paster.paste(&processed.text)?;
+            let typed = crate::linux::live_typing::input()
+                .is_some_and(|input| input.type_final(&processed.text));
+            if !typed {
+                paster.paste(&processed.text)?;
+            }
         }
         if let Some(history) = &self.history {
             let mut draft = crate::dictation::modes::history_draft(
@@ -320,6 +324,7 @@ pub(crate) fn run(
     let mut hotkey = Some(start_shortcuts((binding, options))?);
     let mut shortcuts_suspended = false;
     let mut indicator = LinuxIndicator::new(settings.indicator_position);
+    let mut live_typing = crate::linux::live_typing::LiveTyping::default();
     let mut suppressor =
         crate::linux::audio_control::AudioSuppressor::dictation(settings.recording_audio_behavior);
     let paste_with_shift = Arc::new(AtomicBool::new(settings.paste_with_shift));
@@ -771,7 +776,7 @@ pub(crate) fn run(
                         start_capture(&mut capture, pressed_at, pre_roll, || {
                             feedback::play_provisional_start();
                         });
-                        stream_when_due(&mut capture, &engine, toggle);
+                        stream_when_due(&mut capture, &engine, toggle, !service.is_active());
                     } else if audio_ready || release_while_idle {
                         start_pending = true;
                         if !audio_ready {
@@ -889,6 +894,7 @@ pub(crate) fn run(
             )?;
         }
 
+        live_typing.update(capture.is_previewing(), finishing.is_some() || pending > 0);
         indicator.update(capture.is_recording() || start_pending, pending);
         match input.recv_timeout(
             UPDATE_INTERVAL,
@@ -936,7 +942,7 @@ pub(crate) fn run(
                     // Ordinary shortcut chords and short taps never mute or pause.
                     suppressor.suppress();
                 }
-                stream_when_due(&mut capture, &engine, toggle);
+                stream_when_due(&mut capture, &engine, toggle, !service.is_active());
                 capture.report_live_text();
             }
             RecoveringAudioInputEvent::Timeout => {}
@@ -1061,10 +1067,24 @@ fn start_service_capture(
 }
 
 /// Streams once the hold counts, so short taps and chords never reach the
-/// model; a Toggle press is deliberate and streams at once.
-fn stream_when_due(capture: &mut DictationCapture, engine: &TranscriptionEngine, toggle: bool) {
-    if capture.is_recording() && (toggle || capture.is_intentional()) {
-        capture.begin_stream(engine);
+/// model; a Toggle press is deliberate and streams at once. A dictation that
+/// `pastes`, rather than answering a local API client, previews with Live
+/// typing while a field can show it.
+fn stream_when_due(
+    capture: &mut DictationCapture,
+    engine: &TranscriptionEngine,
+    toggle: bool,
+    pastes: bool,
+) {
+    if !capture.is_recording() || capture.is_streaming() || !(toggle || capture.is_intentional()) {
+        return;
+    }
+    match pastes
+        .then(crate::linux::live_typing::preview_chunk_ms)
+        .flatten()
+    {
+        Some(chunk_ms) => capture.begin_preview_stream(engine, chunk_ms),
+        None => capture.begin_stream(engine),
     }
 }
 
@@ -1123,7 +1143,9 @@ fn submit_capture(
         }
         Finish::Transcribe(mut clip) => {
             let audio_ms = clip.duration_ms();
-            let stream = clip.take_stream();
+            // Live typing's preview is rough: the words that stay come from
+            // the whole clip.
+            let stream = clip.take_stream().filter(|stream| !stream.is_preview());
             let samples = clip.into_transcription_samples();
             let recording = crate::history::Recording::keep(&samples);
             let job = OutputJob::Dictation(Job {
@@ -1208,7 +1230,7 @@ mod tests {
     ) -> CaptureInstant {
         let start = capture_time();
         start_capture(capture, start, PRE_ROLL, || {});
-        stream_when_due(capture, engine, toggle);
+        stream_when_due(capture, engine, toggle, false);
         let mut through = start;
         for _ in 0..seconds * 10 {
             through = through + Duration::from_millis(100);
@@ -1217,7 +1239,7 @@ mod tests {
                 .collect::<Vec<_>>();
             capture.ingest(&tone, through);
             capture.become_intentional(through);
-            stream_when_due(capture, engine, toggle);
+            stream_when_due(capture, engine, toggle, false);
         }
         through
     }
@@ -1334,15 +1356,15 @@ mod tests {
             let mut capture = DictationCapture::new(16_000);
             let start = capture_time();
             start_capture(&mut capture, start, PRE_ROLL, || {});
-            stream_when_due(&mut capture, &engine, toggle);
+            stream_when_due(&mut capture, &engine, toggle, false);
             assert_eq!(capture.is_streaming(), toggle);
             capture.ingest(&[0.1; 1_600], start + Duration::from_millis(100));
             capture.become_intentional(start + Duration::from_millis(100));
-            stream_when_due(&mut capture, &engine, toggle);
+            stream_when_due(&mut capture, &engine, toggle, false);
             assert_eq!(capture.is_streaming(), toggle, "toggle={toggle}");
             capture.ingest(&[0.1; 3_200], start + MINIMUM_HOLD);
             capture.become_intentional(start + MINIMUM_HOLD);
-            stream_when_due(&mut capture, &engine, toggle);
+            stream_when_due(&mut capture, &engine, toggle, false);
             assert!(capture.is_streaming());
             let begun = commands
                 .try_iter()
@@ -1430,7 +1452,7 @@ mod tests {
         let mut short = DictationCapture::new(16_000);
         let start = capture_time();
         start_capture(&mut short, start, PRE_ROLL, || {});
-        stream_when_due(&mut short, &engine, true);
+        stream_when_due(&mut short, &engine, true, false);
         short.ingest(&[0.1; 1_600], start + Duration::from_millis(100));
         // A printing stop of a short tap prints nothing and says why.
         let (print, printed) = PrintReply::channel();

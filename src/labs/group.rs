@@ -56,6 +56,7 @@ impl Feature {
             | Self::VocabularyBiasing
             | Self::PauseBrowser
             | Self::SkipPauses
+            | Self::LiveTyping
             | Self::VoiceFilter
             | Self::HideMenuBarIcon
             | Self::SettingsSearch

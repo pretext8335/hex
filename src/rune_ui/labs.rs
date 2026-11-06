@@ -552,6 +552,14 @@ fn rows(ui: &Ui) -> Vec<Row> {
             tr("Tap or hold"),
             tr("In Toggle mode, hold the shortcut to dictate until you let go; a short tap still starts and stops"),
         ));
+        if Feature::LiveTyping.on_this_os() {
+            rows.push(row(
+                Feature::LiveTyping,
+                None,
+                tr("Live typing"),
+                tr("See your words in the text field as you speak, then type the final text there instead of pasting. Wayland only"),
+            ));
+        }
         rows.push(row(
             Feature::GnomeClipboardRestore,
             None,
@@ -757,6 +765,7 @@ fn row_key(lab: Lab) -> &'static str {
         Feature::NotchIndicator => "lab-notch-indicator",
         Feature::MeetingFinishedEvent => "lab-meeting-finished-event",
         Feature::GnomeMeetingCapsules => "lab-gnome-meeting-capsules",
+        Feature::LiveTyping => "lab-live-typing",
         Feature::Screenshots => "lab-screenshots",
         Feature::FollowLiveTranscript => "lab-follow-live-transcript",
         Feature::MoreCallApps => "lab-more-call-apps",
@@ -808,6 +817,20 @@ fn extras(ui: &Ui, p: Paint, entry: &Row) -> Option<El> {
         return None;
     }
     match entry.lab {
+        Lab::Feature(Feature::LiveTyping) => Some(
+            row()
+                .key("live-typing-chunk-row")
+                .gap(8.0)
+                .center_y()
+                .flex_wrap()
+                .child(
+                    text(format!("{} (ms)", tr("Update every")))
+                        .key("label")
+                        .font(controls::DESCRIPTION)
+                        .color(p.muted()),
+                )
+                .child(live_typing_chunk(ui, p)),
+        ),
         Lab::Feature(Feature::UnloadIdle) => Some(
             row()
                 .key("unload-after")
@@ -830,6 +853,24 @@ fn extras(ui: &Ui, p: Paint, entry: &Row) -> Option<El> {
         )),
         _ => None,
     }
+}
+
+/// How often Live typing's provisional words update.
+fn live_typing_chunk(ui: &Ui, p: Paint) -> El {
+    use crate::app_settings::LIVE_TYPING_CHUNK_MS;
+    let labels: Vec<String> = LIVE_TYPING_CHUNK_MS
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+    let selected = LIVE_TYPING_CHUNK_MS
+        .iter()
+        .position(|chunk| *chunk == ui.settings.labs.live_typing_chunk_ms)
+        .unwrap_or(1);
+    controls::segmented(p, "live-typing-chunk", &labels, selected, |ui, index| {
+        let chunk = LIVE_TYPING_CHUNK_MS[index];
+        ui.update(|settings| settings.labs.live_typing_chunk_ms = chunk);
+    })
 }
 
 /// How long the model sits unused before it unloads.

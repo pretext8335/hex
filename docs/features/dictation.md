@@ -302,6 +302,40 @@ chunk still runs. Clips that fit the window are unchanged. Check:
 [gguf_session.rs](../../src/transcription/gguf_session.rs) (detector verdict
 overridden; not run with Cohere on real audio).
 
+### Live Typing (Labs, Wayland)
+
+Live typing shows your words in the text field while you speak. They appear
+underlined, as provisional text. When you stop, Hex replaces them with the
+final text. It is off by default. Turn it on with `labs.live_typing`. The code
+is in `src/linux/live_typing.rs`.
+
+Live typing is Wayland only, because it uses Wayland's input method protocol.
+On X11, the option is hidden, and dictation works and pastes as usual.
+
+```ts
+Shortcut dictation starts
+├── A text field is focused -> Provisional words appear as you speak
+│   ├── You stop -> Hex transcribes the whole recording, then types the final text into the field
+│   ├── The final text has a line break -> Hex clears the provisional words and pastes
+│   ├── The field lost focus -> Hex pastes
+│   └── You cancel, or it fails -> Hex clears the provisional words
+└── No text field, or the compositor lacks the protocol -> Normal dictation and paste
+```
+
+**Speed.** `labs.live_typing_chunk_ms` sets how often the words update: 80,
+160, 560, or 1040 ms. The default is 160. Lower values are faster and rougher.
+This only changes the provisional words. It does not change the final text. If
+a model doesn't accept the value, that dictation uses the model's default.
+
+**What it doesn't cover.** Dictations from the local API and `/streams` work as
+usual and never show words in a field. The Live text plate still follows
+`labs.live_text`. Models that can't stream, such as Underdog Bark 3.0, show no
+words while you speak.
+
+**Other input methods.** Only one input method can use the seat at a time. If
+Fcitx5 or IBus holds it, Live typing stays off and Hex tries again every 30 s.
+Turning Live typing off releases the seat.
+
 ### Vocabulary Quality Checks
 
 `hex benchmark-transcription` accepts a scoring vocabulary and expected terms,
